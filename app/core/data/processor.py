@@ -365,56 +365,46 @@ class DataProcessor:
 
     # ==================== Bank Statement Excel Processing ====================
 
-    def process_bank_statement_excel(
+    def _try_process_ukrgasbank(
         self, file_path: str, db_manager: "DatabaseManager"
-    ) -> int:
+    ) -> Optional[int]:
         """
-        Process bank statement from Excel file (.xlsx or .xls).
-        
-        Auto-detects the bank format (Oschadbank or Ukrgasbank) based on
-        column names and processes payments accordingly.
-        
-        Supported formats:
-            - Oschadbank (.xlsx): Header at row 3, columns include
-              'Дебет', 'Кредит', 'Найменування кореспондента',
-              'Призначення платежу', 'Дата валютування'
-            - Ukrgasbank (.xls): Header at row 0, columns include
-              'NAME', 'NAME_KOR', 'SUM_PD_NOM', 'PURPOSE', 'DATA_VYP', 'DK'
-        
-        Args:
-            file_path: Path to the Excel bank statement file.
-            db_manager: DatabaseManager instance for saving payments.
-            
-        Returns:
-            Number of successfully processed payments.
-            
-        Raises:
-            ValueError: If bank format cannot be detected, file cannot be loaded,
-                       or no payments are found.
-        
-        Example:
-            >>> processor = DataProcessor()
-            >>> db = DatabaseManager()
-            >>> count = processor.process_bank_statement_excel("bank_statement.xlsx", db)
-            >>> print(f"Imported {count} payments from bank statement")
-        """
-        self.logger.info(f"Processing bank statement Excel: {file_path}")
+        Attempt to process file as Ukrgasbank format.
 
-        # Try Ukrgasbank format first (header at row 0)
+        Returns:
+            Number of processed payments, or None if format doesn't match.
+
+        Raises:
+            ValueError: If format matches but data is invalid.
+        """
         ukr_columns = {'NAME', 'NAME_KOR', 'PURPOSE', 'SUM_PD_NOM', 'DK', 'DATA_VYP'}
         try:
             df = self._load_excel_with_header(file_path, header=0)
-            if ukr_columns.issubset(set(df.columns)):
-                self.logger.info("Detected Ukrgasbank Excel format")
-                payments = self._parse_ukrgasbank_payments(df)
-                return self._save_bank_payments(payments, db_manager, "Укргазбанк")
+            if not ukr_columns.issubset(set(df.columns)):
+                return None
+
+            self.logger.info("Detected Ukrgasbank Excel format")
+            payments = self._parse_ukrgasbank_payments(df)
+            return self._save_bank_payments(payments, db_manager, "Укргазбанк")
         except ValueError:
             # Re-raise ValueError (e.g., "no payments") — format was detected
             raise
         except (KeyError, TypeError, OSError, AttributeError) as e:
             self.logger.debug(f"Not Ukrgasbank format: {e}")
+            return None
 
-        # Try Oschadbank format (header at row 3)
+    def _try_process_oschadbank(
+        self, file_path: str, db_manager: "DatabaseManager"
+    ) -> Optional[int]:
+        """
+        Attempt to process file as Oschadbank format.
+
+        Returns:
+            Number of processed payments, or None if format doesn't match.
+
+        Raises:
+            ValueError: If format matches but data is invalid.
+        """
         oschad_columns = {
             'Дебет', 'Кредит', 'Найменування кореспондента',
             'Призначення платежу', 'Дата валютування',
@@ -426,15 +416,63 @@ class DataProcessor:
 
             # Read with header at row 3
             df = self._load_excel_with_header(file_path, header=3)
-            if oschad_columns.issubset(set(df.columns)):
-                self.logger.info("Detected Oschadbank Excel format")
-                payments = self._parse_oschadbank_payments(df, company_name)
-                return self._save_bank_payments(payments, db_manager, "Ощадбанк")
+            if not oschad_columns.issubset(set(df.columns)):
+                return None
+
+            self.logger.info("Detected Oschadbank Excel format")
+            payments = self._parse_oschadbank_payments(df, company_name)
+            return self._save_bank_payments(payments, db_manager, "Ощадбанк")
         except ValueError:
             # Re-raise ValueError (e.g., "no payments") — format was detected
             raise
         except (KeyError, TypeError, OSError, AttributeError) as e:
             self.logger.debug(f"Not Oschadbank format: {e}")
+            return None
+
+    def process_bank_statement_excel(
+        self, file_path: str, db_manager: "DatabaseManager"
+    ) -> int:
+        """
+        Process bank statement from Excel file (.xlsx or .xls).
+
+        Auto-detects the bank format (Oschadbank or Ukrgasbank) based on
+        column names and processes payments accordingly.
+
+        Supported formats:
+            - Oschadbank (.xlsx): Header at row 3, columns include
+              'Дебет', 'Кредит', 'Найменування кореспондента',
+              'Призначення платежу', 'Дата валютування'
+            - Ukrgasbank (.xls): Header at row 0, columns include
+              'NAME', 'NAME_KOR', 'SUM_PD_NOM', 'PURPOSE', 'DATA_VYP', 'DK'
+
+        Args:
+            file_path: Path to the Excel bank statement file.
+            db_manager: DatabaseManager instance for saving payments.
+
+        Returns:
+            Number of successfully processed payments.
+
+        Raises:
+            ValueError: If bank format cannot be detected, file cannot be loaded,
+                       or no payments are found.
+
+        Example:
+            >>> processor = DataProcessor()
+            >>> db = DatabaseManager()
+            >>> count = processor.process_bank_statement_excel("bank_statement.xlsx", db)
+            >>> print(f"Imported {count} payments from bank statement")
+        """
+        self.logger.info(f"Processing bank statement Excel: {file_path}")
+
+        # Try Ukrgasbank format first
+        result = self._try_process_ukrgasbank(file_path, db_manager)
+        if result is not None:
+            return result
+
+        # Try Oschadbank format
+        result = self._try_process_oschadbank(file_path, db_manager)
+        if result is not None:
+            return result
 
         raise ValueError(
             "Не вдалося визначити формат банківської виписки.\n"

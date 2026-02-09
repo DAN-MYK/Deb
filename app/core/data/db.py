@@ -545,66 +545,89 @@ class DatabaseManager:
             logger.info(f"Retrieved {len(payments)} payments from database")
             return payments
     
+    def _get_aggregated_data(
+        self, db_path: Path, table_name: str, group_by_sql: str
+    ) -> dict:
+        """
+        Get aggregated data from database with custom GROUP BY.
+
+        Args:
+            db_path: Path to database file
+            table_name: Name of table
+            group_by_sql: SQL for SELECT and GROUP BY (e.g., "period, company, counterparty")
+
+        Returns:
+            Dictionary with tuple keys and sum values
+        """
+        with self._get_connection(db_path, table_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute(f'''
+                SELECT {group_by_sql}, SUM(amount) as total_amount
+                FROM {table_name}
+                GROUP BY {group_by_sql}
+            ''')
+            return {tuple(row[:-1]): row[-1] for row in cursor.fetchall()}
+
+    @staticmethod
+    def _parse_period_for_sort(period: str) -> Tuple[str, str]:
+        """
+        Parse period string for sorting (MM-YYYY → (year, month)).
+
+        Args:
+            period: Period string in MM-YYYY format
+
+        Returns:
+            Tuple of (year, month) for sorting
+        """
+        parts = period.split('-')
+        if len(parts) == 2:
+            month, year = parts
+            return (year, month)
+        return (period, '')
+
     def get_summary_by_period(self) -> List[Tuple[str, str, str, float, float]]:
         """
         Get aggregated summary data by period, company, and counterparty.
-        
+
         Uses SQL aggregation to efficiently compute sums without loading all records.
         This method performs a FULL OUTER JOIN between acts and payments to include
         all combinations, even if one side has no data.
-        
+
         Returns:
             List of tuples (period, company, counterparty, total_act_amount, total_payment_amount)
             Sorted by period (year DESC, month DESC), then company, then counterparty
-            
+
         Raises:
             DatabaseError: If database operation fails
         """
         try:
-            # Get acts aggregation
-            with self._get_acts_connection() as acts_conn:
-                acts_cursor = acts_conn.cursor()
-                acts_cursor.execute('''
-                    SELECT period, company, counterparty, SUM(amount) as total_amount
-                    FROM acts
-                    GROUP BY period, company, counterparty
-                ''')
-                acts_data = {(row[0], row[1], row[2]): row[3] for row in acts_cursor.fetchall()}
-            
-            # Get payments aggregation
-            with self._get_payments_connection() as payments_conn:
-                payments_cursor = payments_conn.cursor()
-                payments_cursor.execute('''
-                    SELECT period, company, counterparty, SUM(amount) as total_amount
-                    FROM payments
-                    GROUP BY period, company, counterparty
-                ''')
-                payments_data = {(row[0], row[1], row[2]): row[3] for row in payments_cursor.fetchall()}
-            
+            # Get aggregated data from both databases
+            acts_data = self._get_aggregated_data(
+                self.acts_db_path, 'acts', 'period, company, counterparty'
+            )
+            payments_data = self._get_aggregated_data(
+                self.payments_db_path, 'payments', 'period, company, counterparty'
+            )
+
             # Combine data (full outer join logic)
             all_keys = set(acts_data.keys()) | set(payments_data.keys())
-            
+
             result = []
             for key in all_keys:
                 period, company, counterparty = key
                 act_amount = acts_data.get(key, 0.0)
                 payment_amount = payments_data.get(key, 0.0)
                 result.append((period, company, counterparty, act_amount, payment_amount))
-            
+
             # Sort by period (year DESC, month DESC), then company, counterparty
-            def sort_key(row: Tuple[str, str, str, float, float]) -> Tuple[str, str, str, str]:
-                period = row[0]
-                parts = period.split('-')
-                if len(parts) == 2:
-                    month, year = parts
-                    return (year, month, row[1], row[2])
-                return (period, '', row[1], row[2])
-            
-            result.sort(key=sort_key, reverse=True)
-            
+            result.sort(
+                key=lambda row: self._parse_period_for_sort(row[0]) + (row[1], row[2]),
+                reverse=True
+            )
+
             logger.info(f"Retrieved {len(result)} summary records by period")
             return result
-            
+
         except sqlite3.Error as e:
             logger.error(f"Failed to get summary by period: {e}")
             raise DatabaseError(f"Failed to retrieve summary data: {e}") from e
@@ -612,55 +635,36 @@ class DatabaseManager:
     def get_summary_by_company(self) -> List[Tuple[str, str, float, float]]:
         """
         Get aggregated summary data by company and year.
-        
+
         Uses SQL aggregation to efficiently compute sums grouped by company and year.
         Extracts year from period field and aggregates across all counterparties.
-        
+
         Returns:
             List of tuples (company, year, total_act_amount, total_payment_amount)
             Sorted by year DESC, then company
-            
+
         Raises:
             DatabaseError: If database operation fails
         """
         try:
-            # Get acts aggregation by company and year
-            with self._get_acts_connection() as acts_conn:
-                acts_cursor = acts_conn.cursor()
-                # Extract year from period (format is MM-YYYY)
-                acts_cursor.execute('''
-                    SELECT 
-                        company,
-                        SUBSTR(period, -4) as year,
-                        SUM(amount) as total_amount
-                    FROM acts
-                    GROUP BY company, year
-                ''')
-                acts_data = {(row[0], row[1]): row[2] for row in acts_cursor.fetchall()}
-            
-            # Get payments aggregation by company and year
-            with self._get_payments_connection() as payments_conn:
-                payments_cursor = payments_conn.cursor()
-                payments_cursor.execute('''
-                    SELECT 
-                        company,
-                        SUBSTR(period, -4) as year,
-                        SUM(amount) as total_amount
-                    FROM payments
-                    GROUP BY company, year
-                ''')
-                payments_data = {(row[0], row[1]): row[2] for row in payments_cursor.fetchall()}
-            
+            # Get aggregated data from both databases (extract year from period)
+            acts_data = self._get_aggregated_data(
+                self.acts_db_path, 'acts', 'company, SUBSTR(period, -4) as year'
+            )
+            payments_data = self._get_aggregated_data(
+                self.payments_db_path, 'payments', 'company, SUBSTR(period, -4) as year'
+            )
+
             # Combine data (full outer join logic)
             all_keys = set(acts_data.keys()) | set(payments_data.keys())
-            
+
             result = []
             for key in all_keys:
                 company, year = key
                 act_amount = acts_data.get(key, 0.0)
                 payment_amount = payments_data.get(key, 0.0)
                 result.append((company, year, act_amount, payment_amount))
-            
+
             # Sort by year DESC, then company
             result.sort(key=lambda x: (x[1], x[0]), reverse=True)
             
