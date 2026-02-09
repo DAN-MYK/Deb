@@ -1,82 +1,497 @@
-import tkinter as tk
+"""
+Act form module.
+
+This module provides a form for adding acts to the database,
+either from files (Excel/PDF) or through manual input.
+"""
+# Standard library imports
+import logging
+from pathlib import Path
 from tkinter import filedialog, messagebox
-from app.core.data.processor import DataProcessor
+from typing import Any, Callable, Optional
+
+logger = logging.getLogger("deb.gui.forms.act")
+
+# Third-party imports
+import customtkinter as ctk
+
+# Local imports
 from app.core.data.db import DatabaseManager
+from app.core.data.processor import DataProcessor
+from app.core.validation.file_validator import FileValidator
+from app.gui.utils.async_worker import run_in_thread
+
 
 class ActForm:
-    def __init__(self, root, data_processor: DataProcessor, db_manager: DatabaseManager, update_callback):
+    """
+    Form for adding acts from file or manually.
+    
+    Provides a tabbed interface with two modes:
+    1. File upload (1С) - Import acts from Excel or PDF files
+    2. Manual entry - Add acts manually through input fields
+    
+    Attributes:
+        data_processor: DataProcessor for file processing
+        db_manager: DatabaseManager for database operations
+        update_callback: Callback to refresh tables after adding acts
+        act_window: The toplevel window widget
+    
+    Example:
+        >>> form = ActForm(root, processor, db_manager, callback)
+        # User interacts with the form to add acts
+    """
+    
+    def __init__(
+        self,
+        root: Any,
+        data_processor: DataProcessor,
+        db_manager: DatabaseManager,
+        update_callback: Callable[[], None]
+    ) -> None:
+        """
+        Initialize the act form.
+        
+        Args:
+            root: Parent window widget
+            data_processor: DataProcessor instance for file processing
+            db_manager: DatabaseManager instance for database operations
+            update_callback: Callback function to refresh tables after adding acts
+        """
         self.data_processor = data_processor
         self.db_manager = db_manager
         self.update_callback = update_callback
+        self.load_button: Optional[ctk.CTkButton] = None
+        self.load_folder_button: Optional[ctk.CTkButton] = None
+        self.status_label: Optional[ctk.CTkLabel] = None
+        self.is_processing = False
 
-        self.act_window = tk.Toplevel(root)
-        self.act_window.title("Додати акт")
-        self.act_window.geometry("400x300")
+        self.act_window = ctk.CTkToplevel(root)
+        self.act_window.title("📄 Додати акт")
+        self.act_window.geometry("650x650")
+        
+        # Центруємо вікно
+        self.act_window.transient(root)
+        self.act_window.grab_set()
+        
+        # Додаємо хоткей Ctrl+Enter для збереження
+        self.act_window.bind('<Control-Return>', lambda event: self.save_act())
 
         self.create_widgets()
 
-    def create_widgets(self):
-        tk.Label(self.act_window, text="Джерело даних:").pack(pady=5)
-        self.source_var = tk.StringVar(value="Вручну")
-        source_menu = tk.OptionMenu(self.act_window, self.source_var, "1С", "Вручну")
-        source_menu.pack()
+    def create_widgets(self) -> None:
+        """
+        Create all form widgets.
+        
+        Creates a tabbed interface with:
+        - 1С tab: For file upload (Excel/PDF)
+        - Manual tab: For manual data entry
+        """
+        # Основний контейнер
+        main_frame = ctk.CTkFrame(self.act_window)
+        main_frame.pack(pady=20, padx=20, fill="both", expand=True)
+        
+        # Заголовок
+        title_label = ctk.CTkLabel(
+            main_frame, 
+            text="Додавання акту",
+            font=ctk.CTkFont(size=18, weight="bold")
+        )
+        title_label.pack(pady=(10, 20))
+        
+        # Створюємо вкладки
+        self.tabview = ctk.CTkTabview(main_frame, width=550, height=420)
+        self.tabview.pack(pady=10, padx=10, fill="both", expand=True)
+        
+        # Додаємо вкладки
+        self.tabview.add("1С")
+        self.tabview.add("Вручну")
+        
+        # Вкладка 1С
+        self.create_1c_tab()
+        
+        # Вкладка Вручну
+        self.create_manual_tab()
 
-        tk.Label(self.act_window, text="Компанія: Организация").pack(pady=5)
-        self.company_entry = tk.Entry(self.act_window, width=40)
-        self.company_entry.pack()
+    def create_1c_tab(self) -> None:
+        """Створює вміст вкладки 1С"""
+        tab_1c = self.tabview.tab("1С")
+        
+        # Інформаційний блок
+        info_frame = ctk.CTkFrame(tab_1c, fg_color=("gray90", "gray20"))
+        info_frame.pack(pady=20, padx=20, fill="x")
+        
+        info_text = """📋 Завантаження файлу або папки
 
-        tk.Label(self.act_window, text="Контрагент:").pack(pady=5)
-        self.counterparty_entry = tk.Entry(self.act_window, width=40)
-        self.counterparty_entry.pack()
+Підтримувані формати:
+• Excel (1С): .xlsx, .xls
+• PDF: текстові документи з актами
 
-        tk.Label(self.act_window, text="Період (наприклад, 11.2019):").pack(pady=5)
-        self.period_entry = tk.Entry(self.act_window, width=40)
-        self.period_entry.pack()
+📂 Завантаження папки:
+• Обробляє всі PDF файли в папці та підпапках
+• Автоматично знаходить акти купівлі-продажу
 
-        tk.Label(self.act_window, text="Сумма з ПДВ (наприклад, 1000,50):").pack(pady=5)
-        self.amount_entry = tk.Entry(self.act_window, width=40)
-        self.amount_entry.pack()
+Excel файл має містити колонки:
+• Дата, Сумма, Контрагент, Организация
 
-        self.source_var.trace("w", lambda *args: self.toggle_fields())
-        self.toggle_fields()
+PDF файл має містити:
+• Номер та дату акту
+• Дані про виконавця та замовника
+• Загальну суму з ПДВ"""
+        
+        info_label = ctk.CTkLabel(
+            info_frame,
+            text=info_text,
+            font=ctk.CTkFont(size=12),
+            justify="left"
+        )
+        info_label.pack(pady=15, padx=15)
+        
+        # Контейнер для кнопок
+        buttons_frame = ctk.CTkFrame(tab_1c, fg_color="transparent")
+        buttons_frame.pack(pady=20)
+        
+        # Кнопка завантаження файлу
+        self.load_button = ctk.CTkButton(
+            buttons_frame,
+            text="📂 Завантажити файл",
+            command=self.load_file_1c,
+            width=250,
+            height=45,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            fg_color="#3498db",
+            hover_color="#2980b9"
+        )
+        self.load_button.pack(pady=5)
+        
+        # Кнопка завантаження папки
+        self.load_folder_button = ctk.CTkButton(
+            buttons_frame,
+            text="📁 Завантажити папку з актами",
+            command=self.load_folder_1c,
+            width=250,
+            height=45,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            fg_color="#9b59b6",
+            hover_color="#8e44ad"
+        )
+        self.load_folder_button.pack(pady=5)
+        
+        # Статус label
+        self.status_label = ctk.CTkLabel(
+            tab_1c,
+            text="",
+            font=ctk.CTkFont(size=12),
+            text_color="gray"
+        )
+        self.status_label.pack(pady=5)
 
-        tk.Button(self.act_window, text="Завантажити файл", command=self.load_file).pack(pady=5)
-        tk.Button(self.act_window, text="Зберегти акт", command=self.save_act).pack(pady=5)
+    def create_manual_tab(self) -> None:
+        """Створює вміст вкладки Вручну"""
+        tab_manual = self.tabview.tab("Вручну")
+        
+        # Компанія
+        ctk.CTkLabel(
+            tab_manual, 
+            text="Компанія (Организация):", 
+            font=ctk.CTkFont(size=13)
+        ).pack(pady=(10, 3), anchor="w", padx=20)
+        self.company_entry = ctk.CTkEntry(tab_manual, width=400, height=35)
+        self.company_entry.pack(pady=3, padx=20, fill="x")
 
-    def toggle_fields(self):
-        state = 'disabled' if self.source_var.get() == "1С" else 'normal'
-        self.company_entry.config(state=state)
-        self.counterparty_entry.config(state=state)
-        self.period_entry.config(state=state)
-        self.amount_entry.config(state=state)
+        # Контрагент
+        ctk.CTkLabel(
+            tab_manual, 
+            text="Контрагент:", 
+            font=ctk.CTkFont(size=13)
+        ).pack(pady=(8, 3), anchor="w", padx=20)
+        self.counterparty_entry = ctk.CTkEntry(tab_manual, width=400, height=35)
+        self.counterparty_entry.pack(pady=3, padx=20, fill="x")
 
-    def load_file(self):
-        if self.source_var.get() == "1С":
-            file_path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx *.xls")])
-            if file_path:
+        # Період
+        ctk.CTkLabel(
+            tab_manual, 
+            text="Період (наприклад, 11.2019):", 
+            font=ctk.CTkFont(size=13)
+        ).pack(pady=(8, 3), anchor="w", padx=20)
+        self.period_entry = ctk.CTkEntry(
+            tab_manual, 
+            width=400, 
+            height=35, 
+            placeholder_text="11.2019"
+        )
+        self.period_entry.pack(pady=3, padx=20, fill="x")
+
+        # Сума
+        ctk.CTkLabel(
+            tab_manual, 
+            text="Сумма з ПДВ (наприклад, 1000,50):", 
+            font=ctk.CTkFont(size=13)
+        ).pack(pady=(8, 3), anchor="w", padx=20)
+        self.amount_entry = ctk.CTkEntry(
+            tab_manual, 
+            width=400, 
+            height=35, 
+            placeholder_text="1000,50"
+        )
+        self.amount_entry.pack(pady=3, padx=20, fill="x")
+        
+        # Підказка про хоткей
+        ctk.CTkLabel(
+            tab_manual,
+            text="⌨️ Ctrl+Enter для швидкого збереження",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        ).pack(pady=(15, 5))
+        
+        # Кнопка збереження
+        ctk.CTkButton(
+            tab_manual,
+            text="💾 Зберегти",
+            command=self.save_act,
+            width=250,
+            height=45,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            fg_color="#2ecc71",
+            hover_color="#27ae60"
+        ).pack(pady=(5, 20))
+
+    def load_file_1c(self) -> None:
+        """Завантаження файлу з 1С або PDF"""
+        if self.is_processing:
+            return
+        
+        file_path = filedialog.askopenfilename(
+            title="Виберіть файл",
+            filetypes=[
+                ("Supported files", "*.xlsx *.xls *.pdf"),
+                ("Excel files", "*.xlsx *.xls"),
+                ("PDF files", "*.pdf")
+            ]
+        )
+        if not file_path:
+            return
+
+        # Validate file
+        try:
+            FileValidator.validate_file_path(
+                file_path,
+                allowed_extensions=['.xlsx', '.xls', '.xlsm', '.pdf']
+            )
+        except (FileNotFoundError, ValueError, PermissionError) as e:
+            messagebox.showerror("Помилка валідації", str(e))
+            return
+
+        # Визначаємо тип файлу за розширенням
+        file_extension = file_path.lower().split('.')[-1]
+        
+        # Disable buttons and show status
+        self.is_processing = True
+        if self.load_button:
+            self.load_button.configure(state="disabled")
+        if self.load_folder_button:
+            self.load_folder_button.configure(state="disabled")
+        if self.status_label:
+            self.status_label.configure(text="⏳ Обробка файлу...")
+        
+        # Define the processing task
+        def process_file() -> tuple:
+            """Process file and return (count, file_type)"""
+            if file_extension == 'pdf':
+                count = self.data_processor.process_act_pdf(file_path, self.db_manager)
+                return count, "PDF"
+            elif file_extension in ['xlsx', 'xls', 'xlsm']:
+                count = self.data_processor.process_1c_acts(file_path, self.db_manager)
+                return count, "Excel"
+            else:
+                raise ValueError(f"Непідтримуваний формат файлу: {file_extension}")
+        
+        # Define completion callback
+        def on_complete(result: tuple) -> None:
+            """Handle successful completion"""
+            count, file_type = result
+            self.is_processing = False
+            
+            if self.load_button:
+                self.load_button.configure(state="normal")
+            if self.load_folder_button:
+                self.load_folder_button.configure(state="normal")
+            if self.status_label:
+                self.status_label.configure(text="")
+            
+            message = f"✅ Файл успішно оброблено!\n\n"
+            message += f"📄 Актів додано: {count}\n"
+            message += f"📎 Тип файлу: {file_type}"
+            
+            messagebox.showinfo("Успіх", message)
+            self.update_callback()
+            self.act_window.destroy()
+        
+        # Define error callback
+        def on_error(error: Exception) -> None:
+            """Handle processing error"""
+            self.is_processing = False
+            
+            if self.load_button:
+                self.load_button.configure(state="normal")
+            if self.load_folder_button:
+                self.load_folder_button.configure(state="normal")
+            if self.status_label:
+                self.status_label.configure(text="❌ Помилка обробки")
+            
+            messagebox.showerror("Помилка", f"Не вдалося обробити файл:\n{str(error)}")
+        
+        # Run processing in background thread
+        run_in_thread(
+            task=process_file,
+            on_complete=on_complete,
+            on_error=on_error
+        )
+
+    def load_folder_1c(self) -> None:
+        """Завантаження папки з PDF актами (рекурсивно)"""
+        if self.is_processing:
+            return
+        
+        folder_path = filedialog.askdirectory(
+            title="Виберіть папку з актами"
+        )
+        if not folder_path:
+            return
+
+        # Validate directory
+        try:
+            FileValidator.validate_directory_path(folder_path)
+        except (FileNotFoundError, ValueError, PermissionError) as e:
+            messagebox.showerror("Помилка валідації", str(e))
+            return
+
+        folder = Path(folder_path)
+
+        # Знаходимо всі PDF файли рекурсивно
+        pdf_files = list(folder.rglob("*.pdf"))
+        
+        if not pdf_files:
+            messagebox.showwarning(
+                "Увага", 
+                f"У вибраній папці та її підпапках не знайдено жодного PDF файлу"
+            )
+            return
+        
+        # Питаємо підтвердження
+        confirm = messagebox.askyesno(
+            "Підтвердження",
+            f"Знайдено {len(pdf_files)} PDF файл(ів) для обробки.\n\n"
+            f"Продовжити обробку?"
+        )
+        
+        if not confirm:
+            return
+        
+        # Disable buttons and show status
+        self.is_processing = True
+        if self.load_button:
+            self.load_button.configure(state="disabled")
+        if self.load_folder_button:
+            self.load_folder_button.configure(state="disabled")
+        if self.status_label:
+            self.status_label.configure(text=f"⏳ Обробка 0/{len(pdf_files)} файлів...")
+        
+        # Define the processing task
+        def process_folder() -> tuple:
+            """Process all PDF files in folder and return (success_count, failed_count, total)"""
+            success_count = 0
+            failed_count = 0
+            total_acts = 0
+            
+            for idx, pdf_file in enumerate(pdf_files, 1):
+                # Update status label
+                if self.status_label:
+                    relative_path = pdf_file.relative_to(folder)
+                    self.status_label.configure(
+                        text=f"⏳ Обробка {idx}/{len(pdf_files)}: {relative_path.name}"
+                    )
+                
                 try:
-                    self.data_processor.process_1c_acts(file_path, self.db_manager)
-                    messagebox.showinfo("Успіх", "Акти з 1С успішно збережено!")
-                    self.update_callback()
-                    self.act_window.destroy()
+                    # Process the PDF file
+                    count = self.data_processor.process_act_pdf(str(pdf_file), self.db_manager)
+                    total_acts += count
+                    success_count += 1
+                except (ValueError, OSError, PermissionError, FileNotFoundError) as e:
+                    failed_count += 1
+                    logger.error(
+                        f"Error processing {pdf_file.name}: {type(e).__name__}: {e}"
+                    )
                 except Exception as e:
-                    messagebox.showerror("Помилка", f"Не вдалося обробити файл: {str(e)}")
+                    failed_count += 1
+                    logger.critical(
+                        f"Unexpected error processing {pdf_file.name}: {type(e).__name__}: {e}",
+                        exc_info=True
+                    )
+            
+            return success_count, failed_count, total_acts
+        
+        # Define completion callback
+        def on_complete(result: tuple) -> None:
+            """Handle successful completion"""
+            success_count, failed_count, total_acts = result
+            self.is_processing = False
+            
+            if self.load_button:
+                self.load_button.configure(state="normal")
+            if self.load_folder_button:
+                self.load_folder_button.configure(state="normal")
+            if self.status_label:
+                self.status_label.configure(text="")
+            
+            message = f"✅ Обробка папки завершена!\n\n"
+            message += f"📂 Всього файлів: {len(pdf_files)}\n"
+            message += f"✅ Успішно оброблено: {success_count}\n"
+            message += f"❌ Помилок: {failed_count}\n"
+            message += f"📄 Актів додано до БД: {total_acts}"
+            
+            messagebox.showinfo("Успіх", message)
+            self.update_callback()
+            self.act_window.destroy()
+        
+        # Define error callback
+        def on_error(error: Exception) -> None:
+            """Handle processing error"""
+            self.is_processing = False
+            
+            if self.load_button:
+                self.load_button.configure(state="normal")
+            if self.load_folder_button:
+                self.load_folder_button.configure(state="normal")
+            if self.status_label:
+                self.status_label.configure(text="❌ Помилка обробки")
+            
+            messagebox.showerror("Помилка", f"Не вдалося обробити папку:\n{str(error)}")
+        
+        # Run processing in background thread
+        run_in_thread(
+            task=process_folder,
+            on_complete=on_complete,
+            on_error=on_error
+        )
 
-    def save_act(self):
-        if self.source_var.get() == "Вручну":
-            try:
-                company = self.company_entry.get()
-                counterparty = self.counterparty_entry.get()
-                period = self.period_entry.get()
-                amount_str = self.amount_entry.get().replace(',', '.')  # Замінюємо кому на крапку
-                amount = float(amount_str)
+    def save_act(self) -> None:
+        """Збереження акту, введеного вручну"""
+        try:
+            company = self.company_entry.get().strip()
+            counterparty = self.counterparty_entry.get().strip()
+            period = self.period_entry.get().strip()
+            amount_str = self.amount_entry.get().strip().replace(',', '.')
+            
+            if not company or not counterparty or not period or not amount_str:
+                raise ValueError("Усі поля мають бути заповнені!")
+            
+            amount = float(amount_str)
 
-                if not company or not counterparty or not period:
-                    raise ValueError("Усі поля мають бути заповнені!")
-
-                self.db_manager.save_act(company, counterparty, period, amount)
-                messagebox.showinfo("Успіх", "Акт успішно збережено!")
-                self.update_callback()
-                self.act_window.destroy()
-            except ValueError as e:
-                messagebox.showerror("Помилка", str(e))
+            self.db_manager.save_act(company, counterparty, period, amount)
+            messagebox.showinfo("Успіх", "Акт успішно збережено!")
+            self.update_callback()
+            self.act_window.destroy()
+        except ValueError as e:
+            messagebox.showerror("Помилка", str(e))
+        except Exception as e:
+            messagebox.showerror("Помилка", f"Не вдалося зберегти акт:\n{str(e)}")
