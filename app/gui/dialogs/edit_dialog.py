@@ -23,6 +23,7 @@ class EditField:
     placeholder: str = ""
     validator: Optional[Callable[[str], Optional[str]]] = None
     parser: Optional[Callable[[str], Any]] = None
+    options: Optional[list[str]] = None  # Для випадаючого списку
 
 
 class EditDialog:
@@ -45,7 +46,7 @@ class EditDialog:
         self.dialog.transient(parent)
         self.dialog.grab_set()
 
-        self._entries: Dict[str, ctk.CTkEntry] = {}
+        self._entries: Dict[str, Any] = {}  # CTkEntry або CTkComboBox
         self._errors: Dict[str, ctk.CTkLabel] = {}
 
         self._build_ui()
@@ -59,16 +60,28 @@ class EditDialog:
             label = ctk.CTkLabel(main_frame, text=f"{field.label}:", font=fonts["base"])
             label.pack(pady=(10 if idx > 0 else 0, 4), anchor="w")
 
-            entry = ctk.CTkEntry(
-                main_frame,
-                width=450,
-                height=SPACING["button_height"],
-                placeholder_text=field.placeholder,
-            )
-            if field.value:
-                entry.insert(0, field.value)
-            entry.pack(pady=(0, 2), fill="x")
-            self._entries[field.key] = entry
+            # Використовуємо ComboBox якщо є options, інакше Entry
+            if field.options:
+                widget = ctk.CTkComboBox(
+                    main_frame,
+                    width=450,
+                    height=SPACING["button_height"],
+                    values=field.options,
+                )
+                if field.value:
+                    widget.set(field.value)
+            else:
+                widget = ctk.CTkEntry(
+                    main_frame,
+                    width=450,
+                    height=SPACING["button_height"],
+                    placeholder_text=field.placeholder,
+                )
+                if field.value:
+                    widget.insert(0, field.value)
+
+            widget.pack(pady=(0, 2), fill="x")
+            self._entries[field.key] = widget
 
             error_label = ctk.CTkLabel(main_frame, text="", font=ctk.CTkFont(size=11), text_color="red")
             error_label.pack(pady=(0, 4), anchor="w")

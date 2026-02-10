@@ -138,6 +138,7 @@ class DatabaseManager:
                     period TEXT NOT NULL,
                     amount REAL NOT NULL,
                     payment_date TEXT,
+                    purpose TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
@@ -152,6 +153,11 @@ class DatabaseManager:
                 # Add payment_date column if it doesn't exist (migration for existing databases)
                 logger.info("Adding payment_date column to existing payments table")
                 cursor.execute("ALTER TABLE payments ADD COLUMN payment_date TEXT")
+
+            if 'purpose' not in columns:
+                # Add purpose column if it doesn't exist (migration for existing databases)
+                logger.info("Adding purpose column to existing payments table")
+                cursor.execute("ALTER TABLE payments ADD COLUMN purpose TEXT")
             
             # Create indexes for common query patterns
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_payments_period ON payments(period)')
@@ -1012,10 +1018,12 @@ class DatabaseManager:
         new_period: str,
         new_amount: float,
         energy_volume: Optional[float] = None,
+        cost_without_vat: Optional[float] = None,
+        price_without_vat: Optional[float] = None,
     ) -> int:
         """
         Update a specific act in the database.
-        
+
         Args:
             old_company: Current company name
             old_counterparty: Current counterparty name
@@ -1026,10 +1034,12 @@ class DatabaseManager:
             new_period: New period
             new_amount: New amount
             energy_volume: Optional energy volume in kWh
-            
+            cost_without_vat: Optional cost without VAT
+            price_without_vat: Optional price per unit without VAT
+
         Returns:
             Number of acts updated
-            
+
         Raises:
             ValueError: If data validation fails
             DatabaseError: If database operation fails
@@ -1038,26 +1048,34 @@ class DatabaseManager:
         DataValidator.validate_string(new_company, "company")
         DataValidator.validate_string(new_counterparty, "counterparty")
         DataValidator.validate_amount(new_amount, "amount")
-        
+
         if energy_volume is not None:
             DataValidator.validate_energy_volume(energy_volume, "energy_volume")
-        
+
+        if cost_without_vat is not None:
+            DataValidator.validate_amount(cost_without_vat, "cost_without_vat")
+
+        if price_without_vat is not None:
+            DataValidator.validate_amount(price_without_vat, "price_without_vat")
+
         # Normalize new values
         new_company = DataNormalizer.normalize_company(new_company)
         new_counterparty = DataNormalizer.normalize_counterparty(new_counterparty)
         new_period = DataNormalizer.normalize_period(new_period)
-        
+
         # Validate period after normalization
         DataValidator.validate_period(new_period)
-        
+
         try:
             with self._get_acts_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    UPDATE acts 
-                    SET company = ?, counterparty = ?, period = ?, amount = ?, energy_volume = ?
+                    UPDATE acts
+                    SET company = ?, counterparty = ?, period = ?, amount = ?,
+                        energy_volume = ?, cost_without_vat = ?, price_without_vat = ?
                     WHERE company = ? AND counterparty = ? AND period = ? AND amount = ?
                 ''', (new_company, new_counterparty, new_period, new_amount, energy_volume,
+                     cost_without_vat, price_without_vat,
                      old_company, old_counterparty, old_period, old_amount))
                 updated_count = cursor.rowcount
                 logger.info(f"Updated {updated_count} act(s)")
@@ -1156,3 +1174,33 @@ class DatabaseManager:
             logger.info(f"Deleted {payments_deleted} payments")
 
         logger.info("Database cleared successfully")
+
+    def get_unique_companies(self) -> List[str]:
+        """
+        Отримати список унікальних компаній з бази даних актів.
+
+        Returns:
+            Відсортований список унікальних назв компаній
+
+        Raises:
+            DatabaseError: Якщо операція не вдалася
+        """
+        with self._get_acts_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT DISTINCT company FROM acts ORDER BY company')
+            return [row[0] for row in cursor.fetchall()]
+
+    def get_unique_counterparties(self) -> List[str]:
+        """
+        Отримати список унікальних контрагентів з бази даних актів.
+
+        Returns:
+            Відсортований список унікальних назв контрагентів
+
+        Raises:
+            DatabaseError: Якщо операція не вдалася
+        """
+        with self._get_acts_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT DISTINCT counterparty FROM acts ORDER BY counterparty')
+            return [row[0] for row in cursor.fetchall()]
