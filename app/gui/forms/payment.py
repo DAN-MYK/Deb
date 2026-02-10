@@ -246,9 +246,10 @@ Excel файл має містити відповідні колонки зал�
         # Сума
         self._create_compact_field(
             left_col, "Сума, грн *", "amount_entry",
-            placeholder="1200.00",
+            placeholder="1 200.00",
             tooltip="Сума оплати (обов'язково)"
         )
+        self.amount_entry.bind('<KeyRelease>', self._format_number_field)
 
         # Дата оплати
         self._create_compact_field(
@@ -459,9 +460,10 @@ Excel файл має містити відповідні колонки зал�
             if attr_name in field_map and field_map[attr_name] in self.payment_data:
                 value = self.payment_data[field_map[attr_name]]
                 if value is not None:
-                    # Для суми форматуємо з комою
+                    # Для суми форматуємо з пробілами та комою
                     if attr_name == 'amount_entry':
-                        entry.insert(0, str(value).replace('.', ','))
+                        formatted = self._format_number_display(float(value), decimals=2)
+                        entry.insert(0, formatted)
                     else:
                         entry.insert(0, str(value))
 
@@ -496,6 +498,90 @@ Excel файл має містити відповідні колонки зал�
 
         widget.bind('<Enter>', on_enter)
         widget.bind('<Leave>', on_leave)
+
+    def _format_number_field(self, event: Any) -> None:
+        """Форматує числове поле з розділювачами тисячних (пробіли)."""
+        widget = event.widget
+
+        # Отримуємо поточне значення та позицію курсору
+        current_value = widget.get()
+        cursor_pos = widget.index("insert")
+
+        # Видаляємо всі пробіли для обробки
+        clean_value = current_value.replace(' ', '')
+
+        # Якщо порожнє або тільки роздільник - не форматуємо
+        if not clean_value or clean_value in [',', '.']:
+            return
+
+        try:
+            # Розділяємо на цілу та дробову частини
+            if ',' in clean_value:
+                parts = clean_value.split(',')
+            elif '.' in clean_value:
+                parts = clean_value.split('.')
+            else:
+                parts = [clean_value, '']
+
+            integer_part = parts[0]
+            decimal_part = parts[1] if len(parts) > 1 else ''
+
+            # Форматуємо цілу частину з пробілами
+            if integer_part:
+                # Додаємо пробіли кожні 3 цифри справа наліво
+                formatted_int = ''
+                for i, digit in enumerate(reversed(integer_part)):
+                    if i > 0 and i % 3 == 0:
+                        formatted_int = ' ' + formatted_int
+                    formatted_int = digit + formatted_int
+            else:
+                formatted_int = ''
+
+            # Складаємо відформатоване значення
+            if decimal_part or clean_value.endswith(',') or clean_value.endswith('.'):
+                formatted_value = f"{formatted_int},{decimal_part}"
+            else:
+                formatted_value = formatted_int
+
+            # Якщо значення змінилося - оновлюємо
+            if formatted_value != current_value:
+                # Обчислюємо нову позицію курсору
+                spaces_before = current_value[:cursor_pos].count(' ')
+                spaces_after = formatted_value[:cursor_pos].count(' ')
+                new_cursor_pos = cursor_pos + (spaces_after - spaces_before)
+
+                # Оновлюємо значення
+                widget.delete(0, 'end')
+                widget.insert(0, formatted_value)
+
+                # Відновлюємо позицію курсору
+                try:
+                    widget.icursor(max(0, new_cursor_pos))
+                except Exception:
+                    pass
+
+        except (ValueError, IndexError):
+            # Якщо щось пішло не так - не форматуємо
+            pass
+
+    def _format_number_display(self, number: float, decimals: int = 2) -> str:
+        """Форматує число для відображення з пробілами як розділювачі тисячних."""
+        # Форматуємо число
+        formatted = f"{number:.{decimals}f}"
+        # Розділяємо на цілу та дробову частини
+        parts = formatted.split('.')
+        integer_part = parts[0]
+        decimal_part = parts[1] if len(parts) > 1 else ''
+
+        # Додаємо пробіли до цілої частини
+        formatted_int = ''
+        for i, digit in enumerate(reversed(integer_part)):
+            if i > 0 and i % 3 == 0:
+                formatted_int = ' ' + formatted_int
+            formatted_int = digit + formatted_int
+
+        # Повертаємо з комою як роздільник
+        return f"{formatted_int},{decimal_part}" if decimal_part else formatted_int
 
     def load_file_1c(self) -> None:
         """Завантаження файлу оплат (1С або банківська виписка)"""
@@ -651,7 +737,7 @@ Excel файл має містити відповідні колонки зал�
             company = self.company_entry.get().strip()
             counterparty = self.counterparty_entry.get().strip()
             period = self.period_entry.get().strip()
-            amount_str = self.amount_entry.get().strip().replace(',', '.')
+            amount_str = self.amount_entry.get().strip().replace(' ', '').replace(',', '.')
             payment_date = self.payment_date_entry.get().strip() or None
             purpose = self.purpose_entry.get("1.0", "end-1c").strip() or None
 

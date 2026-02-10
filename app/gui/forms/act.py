@@ -287,29 +287,29 @@ class ActForm:
         # Кількість
         self._create_compact_field(
             left_col, "Кількість, кВт·год", "energy_volume_entry",
-            placeholder="1500.00",
+            placeholder="1 500.00",
             tooltip="Обсяг електроенергії"
         )
-        self.energy_volume_entry.bind('<KeyRelease>', self._calculate_price)
+        self.energy_volume_entry.bind('<KeyRelease>', self._on_volume_change)
 
         # Сума з ПДВ
         self._create_compact_field(
             left_col, "Сума з ПДВ, грн *", "amount_entry",
-            placeholder="1200.00",
+            placeholder="1 200.00",
             tooltip="Загальна сума з ПДВ (обов'язково)"
         )
-        self.amount_entry.bind('<KeyRelease>', self._calculate_cost_without_vat)
+        self.amount_entry.bind('<KeyRelease>', self._on_amount_change)
 
         # === Права колонка: Розрахунки ===
 
         # Сума без ПДВ
         self._create_compact_field(
             right_col, "Сума без ПДВ, грн", "cost_without_vat_entry",
-            placeholder="1000.00",
+            placeholder="1 000.00",
             tooltip="Автоматично: сума з ПДВ ÷ 1.2",
             is_calculated=True
         )
-        self.cost_without_vat_entry.bind('<KeyRelease>', self._calculate_price)
+        self.cost_without_vat_entry.bind('<KeyRelease>', self._on_cost_change)
 
         # Ціна без ПДВ
         self._create_compact_field(
@@ -488,16 +488,19 @@ class ActForm:
         # Заповнюємо значенням в режимі редагування
         if self.edit_mode:
             field_map = {
-                'energy_volume_entry': 'energy_volume',
-                'amount_entry': 'amount',
-                'cost_without_vat_entry': 'cost_without_vat',
-                'price_without_vat_entry': 'price_without_vat'
+                'energy_volume_entry': ('energy_volume', 2),
+                'amount_entry': ('amount', 2),
+                'cost_without_vat_entry': ('cost_without_vat', 2),
+                'price_without_vat_entry': ('price_without_vat', 4)
             }
-            if attr_name in field_map and field_map[attr_name] in self.act_data:
-                value = self.act_data[field_map[attr_name]]
-                if value is not None:
-                    # Форматуємо число з комою
-                    entry.insert(0, str(value).replace('.', ','))
+            if attr_name in field_map:
+                field_key, decimals = field_map[attr_name]
+                if field_key in self.act_data:
+                    value = self.act_data[field_key]
+                    if value is not None:
+                        # Форматуємо число з пробілами та комою
+                        formatted = self._format_number_display(float(value), decimals=decimals)
+                        entry.insert(0, formatted)
 
         # Tooltip
         if tooltip:
@@ -531,15 +534,97 @@ class ActForm:
         widget.bind('<Enter>', on_enter)
         widget.bind('<Leave>', on_leave)
 
+    def _format_number_field(self, event: Any) -> None:
+        """Форматує числове поле з розділювачами тисячних (пробіли)."""
+        widget = event.widget
+
+        # Отримуємо поточне значення та позицію курсору
+        current_value = widget.get()
+        cursor_pos = widget.index("insert")
+
+        # Видаляємо всі пробіли для обробки
+        clean_value = current_value.replace(' ', '')
+
+        # Якщо порожнє або тільки роздільник - не форматуємо
+        if not clean_value or clean_value in [',', '.']:
+            return
+
+        try:
+            # Розділяємо на цілу та дробову частини
+            if ',' in clean_value:
+                parts = clean_value.split(',')
+            elif '.' in clean_value:
+                parts = clean_value.split('.')
+            else:
+                parts = [clean_value, '']
+
+            integer_part = parts[0]
+            decimal_part = parts[1] if len(parts) > 1 else ''
+
+            # Форматуємо цілу частину з пробілами
+            if integer_part:
+                # Додаємо пробіли кожні 3 цифри справа наліво
+                formatted_int = ''
+                for i, digit in enumerate(reversed(integer_part)):
+                    if i > 0 and i % 3 == 0:
+                        formatted_int = ' ' + formatted_int
+                    formatted_int = digit + formatted_int
+            else:
+                formatted_int = ''
+
+            # Складаємо відформатоване значення
+            if decimal_part or clean_value.endswith(',') or clean_value.endswith('.'):
+                formatted_value = f"{formatted_int},{decimal_part}"
+            else:
+                formatted_value = formatted_int
+
+            # Якщо значення змінилося - оновлюємо
+            if formatted_value != current_value:
+                # Обчислюємо нову позицію курсору
+                spaces_before = current_value[:cursor_pos].count(' ')
+                spaces_after = formatted_value[:cursor_pos].count(' ')
+                new_cursor_pos = cursor_pos + (spaces_after - spaces_before)
+
+                # Оновлюємо значення
+                widget.delete(0, 'end')
+                widget.insert(0, formatted_value)
+
+                # Відновлюємо позицію курсору
+                try:
+                    widget.icursor(max(0, new_cursor_pos))
+                except Exception:
+                    pass
+
+        except (ValueError, IndexError):
+            # Якщо щось пішло не так - не форматуємо
+            pass
+
+    def _on_amount_change(self, event: Any = None) -> None:
+        """Обробка зміни суми з ПДВ: форматування + розрахунок."""
+        self._format_number_field(event)
+        self._calculate_cost_without_vat()
+
+    def _on_volume_change(self, event: Any = None) -> None:
+        """Обробка зміни кількості: форматування + розрахунок."""
+        self._format_number_field(event)
+        self._calculate_price()
+
+    def _on_cost_change(self, event: Any = None) -> None:
+        """Обробка зміни суми без ПДВ: форматування + розрахунок."""
+        self._format_number_field(event)
+        self._calculate_price()
+
     def _calculate_cost_without_vat(self, event: Any = None) -> None:
         """Автообчислення суми без ПДВ."""
         try:
-            amount_str = self.amount_entry.get().strip().replace(',', '.')
+            amount_str = self.amount_entry.get().strip().replace(' ', '').replace(',', '.')
             if amount_str:
                 amount = float(amount_str)
                 cost_without_vat = amount / 1.2
+                # Форматуємо з пробілами
+                formatted = self._format_number_display(cost_without_vat, decimals=2)
                 self.cost_without_vat_entry.delete(0, 'end')
-                self.cost_without_vat_entry.insert(0, f"{cost_without_vat:.2f}")
+                self.cost_without_vat_entry.insert(0, formatted)
                 self._calculate_price()
         except (ValueError, ZeroDivisionError):
             pass
@@ -547,18 +632,39 @@ class ActForm:
     def _calculate_price(self, event: Any = None) -> None:
         """Автообчислення ціни без ПДВ."""
         try:
-            cost_str = self.cost_without_vat_entry.get().strip().replace(',', '.')
-            volume_str = self.energy_volume_entry.get().strip().replace(',', '.')
+            cost_str = self.cost_without_vat_entry.get().strip().replace(' ', '').replace(',', '.')
+            volume_str = self.energy_volume_entry.get().strip().replace(' ', '').replace(',', '.')
 
             if cost_str and volume_str:
                 cost = float(cost_str)
                 volume = float(volume_str)
                 if volume > 0:
                     price = cost / volume
+                    # Форматуємо з пробілами (4 знаки після коми для ціни)
+                    formatted = self._format_number_display(price, decimals=4)
                     self.price_without_vat_entry.delete(0, 'end')
-                    self.price_without_vat_entry.insert(0, f"{price:.4f}")
+                    self.price_without_vat_entry.insert(0, formatted)
         except (ValueError, ZeroDivisionError):
             pass
+
+    def _format_number_display(self, number: float, decimals: int = 2) -> str:
+        """Форматує число для відображення з пробілами як розділювачі тисячних."""
+        # Форматуємо число
+        formatted = f"{number:.{decimals}f}"
+        # Розділяємо на цілу та дробову частини
+        parts = formatted.split('.')
+        integer_part = parts[0]
+        decimal_part = parts[1] if len(parts) > 1 else ''
+
+        # Додаємо пробіли до цілої частини
+        formatted_int = ''
+        for i, digit in enumerate(reversed(integer_part)):
+            if i > 0 and i % 3 == 0:
+                formatted_int = ' ' + formatted_int
+            formatted_int = digit + formatted_int
+
+        # Повертаємо з комою як роздільник
+        return f"{formatted_int},{decimal_part}" if decimal_part else formatted_int
 
     def load_file_1c(self) -> None:
         """Завантаження файлу з 1С або PDF"""
@@ -785,10 +891,10 @@ class ActForm:
             company = self.company_entry.get().strip()
             counterparty = self.counterparty_entry.get().strip()
             period = self.period_entry.get().strip()
-            energy_volume_str = self.energy_volume_entry.get().strip().replace(',', '.')
-            amount_str = self.amount_entry.get().strip().replace(',', '.')
-            cost_without_vat_str = self.cost_without_vat_entry.get().strip().replace(',', '.')
-            price_without_vat_str = self.price_without_vat_entry.get().strip().replace(',', '.')
+            energy_volume_str = self.energy_volume_entry.get().strip().replace(' ', '').replace(',', '.')
+            amount_str = self.amount_entry.get().strip().replace(' ', '').replace(',', '.')
+            cost_without_vat_str = self.cost_without_vat_entry.get().strip().replace(' ', '').replace(',', '.')
+            price_without_vat_str = self.price_without_vat_entry.get().strip().replace(' ', '').replace(',', '.')
 
             if not company or not counterparty or not period or not amount_str:
                 raise ValueError("Заповніть обов'язкові поля, позначені *")
