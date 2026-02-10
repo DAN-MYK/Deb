@@ -262,7 +262,8 @@ class DatabaseManager:
         counterparty: str,
         period: str,
         amount: float,
-        payment_date: Optional[str] = None
+        payment_date: Optional[str] = None,
+        purpose: Optional[str] = None
     ) -> int:
         """
         Save payment to database with validation and normalization.
@@ -303,9 +304,9 @@ class DatabaseManager:
         with self._get_payments_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO payments (company, counterparty, period, amount, payment_date)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (company, counterparty, period, amount, payment_date))
+                INSERT INTO payments (company, counterparty, period, amount, payment_date, purpose)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (company, counterparty, period, amount, payment_date, purpose))
             payment_id = cursor.lastrowid
             if payment_id is None:
                 raise DatabaseError("Failed to get ID of saved payment")
@@ -1093,11 +1094,13 @@ class DatabaseManager:
         new_company: str,
         new_counterparty: str,
         new_period: str,
-        new_amount: float
+        new_amount: float,
+        payment_date: Optional[str] = None,
+        purpose: Optional[str] = None
     ) -> int:
         """
         Update a specific payment in the database.
-        
+
         Args:
             old_company: Current company name
             old_counterparty: Current counterparty name
@@ -1107,10 +1110,12 @@ class DatabaseManager:
             new_counterparty: New counterparty name (will be normalized)
             new_period: New period
             new_amount: New amount
-            
+            payment_date: Optional payment date in YYYY-MM-DD format
+            purpose: Optional payment purpose description
+
         Returns:
             Number of payments updated
-            
+
         Raises:
             ValueError: If data validation fails
             DatabaseError: If database operation fails
@@ -1119,23 +1124,24 @@ class DatabaseManager:
         DataValidator.validate_string(new_company, "company")
         DataValidator.validate_string(new_counterparty, "counterparty")
         DataValidator.validate_amount(new_amount, "amount")
-        
+
         # Normalize new values
         new_company = DataNormalizer.normalize_company(new_company)
         new_counterparty = DataNormalizer.normalize_counterparty(new_counterparty)
         new_period = DataNormalizer.normalize_period(new_period)
-        
+
         # Validate period after normalization
         DataValidator.validate_period(new_period)
-        
+
         try:
             with self._get_payments_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    UPDATE payments 
-                    SET company = ?, counterparty = ?, period = ?, amount = ?
+                    UPDATE payments
+                    SET company = ?, counterparty = ?, period = ?, amount = ?,
+                        payment_date = ?, purpose = ?
                     WHERE company = ? AND counterparty = ? AND period = ? AND amount = ?
-                ''', (new_company, new_counterparty, new_period, new_amount,
+                ''', (new_company, new_counterparty, new_period, new_amount, payment_date, purpose,
                      old_company, old_counterparty, old_period, old_amount))
                 updated_count = cursor.rowcount
                 logger.info(f"Updated {updated_count} payment(s)")
