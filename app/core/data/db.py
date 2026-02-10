@@ -29,6 +29,7 @@ class DatabaseManager:
         """Initialize database manager and create database files."""
         self.acts_db_path = Path(settings.data_dir) / settings.acts_db_name
         self.payments_db_path = Path(settings.data_dir) / settings.payments_db_name
+        self.adjustments_db_path = Path(settings.data_dir) / "act_adjustments.db"
         self._ensure_data_dir()
         self._init_databases()
     
@@ -77,6 +78,12 @@ class DatabaseManager:
         """Context manager for payments database connection."""
         with self._get_connection(self.payments_db_path, "Payments") as conn:
             yield conn
+
+    @contextmanager
+    def _get_adjustments_connection(self) -> Iterator[sqlite3.Connection]:
+        """Context manager for act adjustments database connection."""
+        with self._get_connection(self.adjustments_db_path, "ActAdjustments") as conn:
+            yield conn
     
     def _init_databases(self) -> None:
         """Initialize database schemas and indexes."""
@@ -92,6 +99,7 @@ class DatabaseManager:
                     amount REAL NOT NULL,
                     energy_volume REAL,
                     cost_without_vat REAL,
+                    price_without_vat REAL,
                     pdf_path TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -105,6 +113,11 @@ class DatabaseManager:
                 # Add pdf_path column if it doesn't exist (migration for existing databases)
                 logger.info("Adding pdf_path column to existing acts table")
                 cursor.execute("ALTER TABLE acts ADD COLUMN pdf_path TEXT")
+
+            if 'price_without_vat' not in columns:
+                # Add price_without_vat column if it doesn't exist (migration for existing databases)
+                logger.info("Adding price_without_vat column to existing acts table")
+                cursor.execute("ALTER TABLE acts ADD COLUMN price_without_vat REAL")
             
             # Create indexes for common query patterns
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_acts_period ON acts(period)')
@@ -146,8 +159,31 @@ class DatabaseManager:
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_payments_company_period ON payments(company, period)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_payments_counterparty ON payments(counterparty)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_payments_payment_date ON payments(payment_date)')
-            
+
             logger.info("Payments database and indexes initialized")
+
+        # Initialize act adjustments database
+        with self._get_adjustments_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS act_adjustments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    company TEXT NOT NULL,
+                    counterparty TEXT NOT NULL,
+                    period TEXT NOT NULL,
+                    adjustment_amount REAL NOT NULL,
+                    description TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            # Create indexes for common query patterns
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_adjustments_period ON act_adjustments(period)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_adjustments_company ON act_adjustments(company)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_adjustments_company_period ON act_adjustments(company, period)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_adjustments_counterparty ON act_adjustments(counterparty)')
+
+            logger.info("Act adjustments database and indexes initialized")
 
     def save_act(
         self,
@@ -157,11 +193,12 @@ class DatabaseManager:
         amount: float,
         energy_volume: Optional[float] = None,
         cost_without_vat: Optional[float] = None,
+        price_without_vat: Optional[float] = None,
         pdf_path: Optional[str] = None
     ) -> int:
         """
         Save act to database with validation and normalization.
-        
+
         Args:
             company: Company name (will be normalized)
             counterparty: Counterparty name (will be normalized)
@@ -169,11 +206,12 @@ class DatabaseManager:
             amount: Act amount in UAH (must be positive)
             energy_volume: Optional energy volume in kWh
             cost_without_vat: Optional cost without VAT in UAH
+            price_without_vat: Optional price per unit without VAT in UAH
             pdf_path: Optional path to source PDF file
-            
+
         Returns:
             ID of the saved act
-            
+
         Raises:
             ValueError: If data validation fails
             DatabaseError: If database operation fails
@@ -188,7 +226,10 @@ class DatabaseManager:
         
         if cost_without_vat is not None:
             DataValidator.validate_amount(cost_without_vat, "cost_without_vat")
-        
+
+        if price_without_vat is not None:
+            DataValidator.validate_amount(price_without_vat, "price_without_vat")
+
         # Normalize first (period needs normalization before validation)
         company = DataNormalizer.normalize_company(company)
         counterparty = DataNormalizer.normalize_counterparty(counterparty)
@@ -200,9 +241,9 @@ class DatabaseManager:
         with self._get_acts_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO acts (company, counterparty, period, amount, energy_volume, cost_without_vat, pdf_path)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (company, counterparty, period, amount, energy_volume, cost_without_vat, pdf_path))
+                INSERT INTO acts (company, counterparty, period, amount, energy_volume, cost_without_vat, price_without_vat, pdf_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (company, counterparty, period, amount, energy_volume, cost_without_vat, price_without_vat, pdf_path))
             act_id = cursor.lastrowid
             if act_id is None:
                 raise DatabaseError("Failed to get ID of saved act")
@@ -503,12 +544,172 @@ class DatabaseManager:
                 logger.info(f"Updated {len(acts)} act(s) with adjustment: {adjustment_amount}")
                 return len(acts), False  # Number of updated acts, not created
 
-    def get_all_acts(self) -> List[Tuple[str, str, str, float, Optional[str]]]:
+    def save_act_adjustment(
+        self,
+        company: str,
+        counterparty: str,
+        period: str,
+        adjustment_amount: float,
+        description: Optional[str] = None
+    ) -> int:
+        """
+        Save act adjustment to database as a separate record.
+
+        Act adjustments are stored independently from acts and are used
+        to increase or decrease act amounts for specific periods without
+        modifying the original acts.
+
+        Args:
+            company: Company name (will be normalized)
+            counterparty: Counterparty name (will be normalized)
+            period: Period in format MM-YYYY or MM.YYYY
+            adjustment_amount: Amount to adjust (positive or negative)
+            description: Optional description of the adjustment
+
+        Returns:
+            ID of the saved adjustment
+
+        Raises:
+            ValueError: If data validation fails
+            DatabaseError: If database operation fails
+        """
+        # Validate inputs
+        DataValidator.validate_string(company, "company")
+        DataValidator.validate_string(counterparty, "counterparty")
+
+        # Note: adjustment_amount can be negative, so we don't validate it as a positive amount
+        if adjustment_amount is None or not isinstance(adjustment_amount, (int, float)):
+            raise ValueError(f"adjustment_amount must be numeric, got {type(adjustment_amount)}")
+
+        # Normalize
+        company = DataNormalizer.normalize_company(company)
+        counterparty = DataNormalizer.normalize_counterparty(counterparty)
+        period = DataNormalizer.normalize_period(period)
+
+        # Validate period after normalization
+        DataValidator.validate_period(period)
+
+        with self._get_adjustments_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO act_adjustments (company, counterparty, period, adjustment_amount, description)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (company, counterparty, period, adjustment_amount, description))
+            adjustment_id = cursor.lastrowid
+            if adjustment_id is None:
+                raise DatabaseError("Failed to get ID of saved adjustment")
+            logger.info(f"Act adjustment saved with ID: {adjustment_id}, amount: {adjustment_amount}")
+            return adjustment_id
+
+    def get_all_act_adjustments(self) -> List[Tuple[int, str, str, str, float, Optional[str]]]:
+        """
+        Get all act adjustments from database.
+
+        Returns:
+            List of tuples (id, company, counterparty, period, adjustment_amount, description)
+            Sorted by created_at DESC
+
+        Raises:
+            DatabaseError: If database operation fails
+        """
+        with self._get_adjustments_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, company, counterparty, period, adjustment_amount, description
+                FROM act_adjustments
+                ORDER BY created_at DESC
+            ''')
+            adjustments = cursor.fetchall()
+            logger.info(f"Retrieved {len(adjustments)} act adjustments from database")
+            return adjustments
+
+    def delete_act_adjustment(self, adjustment_id: int) -> int:
+        """
+        Delete a specific act adjustment from the database.
+
+        Args:
+            adjustment_id: ID of the adjustment to delete
+
+        Returns:
+            Number of adjustments deleted
+
+        Raises:
+            DatabaseError: If database operation fails
+        """
+        try:
+            with self._get_adjustments_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('DELETE FROM act_adjustments WHERE id = ?', (adjustment_id,))
+                deleted_count = cursor.rowcount
+                logger.info(f"Deleted {deleted_count} act adjustment(s) with ID: {adjustment_id}")
+                return deleted_count
+        except sqlite3.Error as e:
+            logger.error(f"Failed to delete act adjustment: {e}")
+            raise DatabaseError(f"Failed to delete act adjustment: {e}") from e
+
+    def update_act_adjustment(
+        self,
+        adjustment_id: int,
+        company: str,
+        counterparty: str,
+        period: str,
+        adjustment_amount: float,
+        description: Optional[str] = None
+    ) -> int:
+        """
+        Update a specific act adjustment in the database.
+
+        Args:
+            adjustment_id: ID of the adjustment to update
+            company: New company name (will be normalized)
+            counterparty: New counterparty name (will be normalized)
+            period: New period
+            adjustment_amount: New adjustment amount
+            description: New description
+
+        Returns:
+            Number of adjustments updated
+
+        Raises:
+            ValueError: If data validation fails
+            DatabaseError: If database operation fails
+        """
+        # Validate inputs
+        DataValidator.validate_string(company, "company")
+        DataValidator.validate_string(counterparty, "counterparty")
+
+        if adjustment_amount is None or not isinstance(adjustment_amount, (int, float)):
+            raise ValueError(f"adjustment_amount must be numeric, got {type(adjustment_amount)}")
+
+        # Normalize
+        company = DataNormalizer.normalize_company(company)
+        counterparty = DataNormalizer.normalize_counterparty(counterparty)
+        period = DataNormalizer.normalize_period(period)
+
+        # Validate period after normalization
+        DataValidator.validate_period(period)
+
+        try:
+            with self._get_adjustments_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE act_adjustments
+                    SET company = ?, counterparty = ?, period = ?, adjustment_amount = ?, description = ?
+                    WHERE id = ?
+                ''', (company, counterparty, period, adjustment_amount, description, adjustment_id))
+                updated_count = cursor.rowcount
+                logger.info(f"Updated {updated_count} act adjustment(s)")
+                return updated_count
+        except sqlite3.Error as e:
+            logger.error(f"Failed to update act adjustment: {e}")
+            raise DatabaseError(f"Failed to update act adjustment: {e}") from e
+
+    def get_all_acts(self) -> List[Tuple[str, str, str, float, Optional[float], Optional[str]]]:
         """
         Get all acts from database.
         
         Returns:
-            List of tuples (company, counterparty, period, amount, pdf_path)
+            List of tuples (company, counterparty, period, amount, energy_volume, pdf_path)
             
         Raises:
             DatabaseError: If database operation fails
@@ -516,7 +717,7 @@ class DatabaseManager:
         with self._get_acts_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT company, counterparty, period, amount, pdf_path 
+                SELECT company, counterparty, period, amount, energy_volume, pdf_path 
                 FROM acts
                 ORDER BY created_at DESC
             ''')
@@ -546,7 +747,7 @@ class DatabaseManager:
             return payments
     
     def _get_aggregated_data(
-        self, db_path: Path, table_name: str, group_by_sql: str
+        self, db_path: Path, table_name: str, group_by_sql: str, amount_column: str = "amount"
     ) -> dict:
         """
         Get aggregated data from database with custom GROUP BY.
@@ -555,6 +756,7 @@ class DatabaseManager:
             db_path: Path to database file
             table_name: Name of table
             group_by_sql: SQL for SELECT and GROUP BY (e.g., "period, company, counterparty")
+            amount_column: Name of the amount column to sum (default: "amount")
 
         Returns:
             Dictionary with tuple keys and sum values
@@ -562,7 +764,7 @@ class DatabaseManager:
         with self._get_connection(db_path, table_name) as conn:
             cursor = conn.cursor()
             cursor.execute(f'''
-                SELECT {group_by_sql}, SUM(amount) as total_amount
+                SELECT {group_by_sql}, SUM({amount_column}) as total_amount
                 FROM {table_name}
                 GROUP BY {group_by_sql}
             ''')
@@ -590,8 +792,10 @@ class DatabaseManager:
         Get aggregated summary data by period, company, and counterparty.
 
         Uses SQL aggregation to efficiently compute sums without loading all records.
-        This method performs a FULL OUTER JOIN between acts and payments to include
-        all combinations, even if one side has no data.
+        This method performs a FULL OUTER JOIN between acts, adjustments and payments
+        to include all combinations, even if one side has no data.
+
+        Act adjustments are added to act amounts to get the final act total.
 
         Returns:
             List of tuples (period, company, counterparty, total_act_amount, total_payment_amount)
@@ -601,23 +805,29 @@ class DatabaseManager:
             DatabaseError: If database operation fails
         """
         try:
-            # Get aggregated data from both databases
+            # Get aggregated data from all databases
             acts_data = self._get_aggregated_data(
-                self.acts_db_path, 'acts', 'period, company, counterparty'
+                self.acts_db_path, 'acts', 'period, company, counterparty', 'amount'
+            )
+            adjustments_data = self._get_aggregated_data(
+                self.adjustments_db_path, 'act_adjustments', 'period, company, counterparty', 'adjustment_amount'
             )
             payments_data = self._get_aggregated_data(
-                self.payments_db_path, 'payments', 'period, company, counterparty'
+                self.payments_db_path, 'payments', 'period, company, counterparty', 'amount'
             )
 
             # Combine data (full outer join logic)
-            all_keys = set(acts_data.keys()) | set(payments_data.keys())
+            all_keys = set(acts_data.keys()) | set(adjustments_data.keys()) | set(payments_data.keys())
 
             result = []
             for key in all_keys:
                 period, company, counterparty = key
                 act_amount = acts_data.get(key, 0.0)
+                adjustment_amount = adjustments_data.get(key, 0.0)
                 payment_amount = payments_data.get(key, 0.0)
-                result.append((period, company, counterparty, act_amount, payment_amount))
+                # Add adjustments to act amount for final total
+                total_act_amount = act_amount + adjustment_amount
+                result.append((period, company, counterparty, total_act_amount, payment_amount))
 
             # Sort by period (year DESC, month DESC), then company, counterparty
             result.sort(
@@ -625,7 +835,7 @@ class DatabaseManager:
                 reverse=True
             )
 
-            logger.info(f"Retrieved {len(result)} summary records by period")
+            logger.info(f"Retrieved {len(result)} summary records by period (including adjustments)")
             return result
 
         except sqlite3.Error as e:
@@ -638,6 +848,7 @@ class DatabaseManager:
 
         Uses SQL aggregation to efficiently compute sums grouped by company and year.
         Extracts year from period field and aggregates across all counterparties.
+        Act adjustments are added to act amounts to get the final act total.
 
         Returns:
             List of tuples (company, year, total_act_amount, total_payment_amount)
@@ -647,30 +858,37 @@ class DatabaseManager:
             DatabaseError: If database operation fails
         """
         try:
-            # Get aggregated data from both databases (extract year from period)
+            # Get aggregated data from all databases (extract year from period)
+            # Note: no alias in group_by_sql - SQLite does not allow aliases in GROUP BY
             acts_data = self._get_aggregated_data(
-                self.acts_db_path, 'acts', 'company, SUBSTR(period, -4) as year'
+                self.acts_db_path, 'acts', 'company, SUBSTR(period, -4)', 'amount'
+            )
+            adjustments_data = self._get_aggregated_data(
+                self.adjustments_db_path, 'act_adjustments', 'company, SUBSTR(period, -4)', 'adjustment_amount'
             )
             payments_data = self._get_aggregated_data(
-                self.payments_db_path, 'payments', 'company, SUBSTR(period, -4) as year'
+                self.payments_db_path, 'payments', 'company, SUBSTR(period, -4)', 'amount'
             )
 
             # Combine data (full outer join logic)
-            all_keys = set(acts_data.keys()) | set(payments_data.keys())
+            all_keys = set(acts_data.keys()) | set(adjustments_data.keys()) | set(payments_data.keys())
 
             result = []
             for key in all_keys:
                 company, year = key
                 act_amount = acts_data.get(key, 0.0)
+                adjustment_amount = adjustments_data.get(key, 0.0)
                 payment_amount = payments_data.get(key, 0.0)
-                result.append((company, year, act_amount, payment_amount))
+                # Add adjustments to act amount for final total
+                total_act_amount = act_amount + adjustment_amount
+                result.append((company, year, total_act_amount, payment_amount))
 
             # Sort by year DESC, then company
             result.sort(key=lambda x: (x[1], x[0]), reverse=True)
-            
-            logger.info(f"Retrieved {len(result)} summary records by company")
+
+            logger.info(f"Retrieved {len(result)} summary records by company (including adjustments)")
             return result
-            
+
         except sqlite3.Error as e:
             logger.error(f"Failed to get summary by company: {e}")
             raise DatabaseError(f"Failed to retrieve summary data: {e}") from e
@@ -792,7 +1010,8 @@ class DatabaseManager:
         new_company: str,
         new_counterparty: str,
         new_period: str,
-        new_amount: float
+        new_amount: float,
+        energy_volume: Optional[float] = None,
     ) -> int:
         """
         Update a specific act in the database.
@@ -806,6 +1025,7 @@ class DatabaseManager:
             new_counterparty: New counterparty name (will be normalized)
             new_period: New period
             new_amount: New amount
+            energy_volume: Optional energy volume in kWh
             
         Returns:
             Number of acts updated
@@ -818,6 +1038,9 @@ class DatabaseManager:
         DataValidator.validate_string(new_company, "company")
         DataValidator.validate_string(new_counterparty, "counterparty")
         DataValidator.validate_amount(new_amount, "amount")
+        
+        if energy_volume is not None:
+            DataValidator.validate_energy_volume(energy_volume, "energy_volume")
         
         # Normalize new values
         new_company = DataNormalizer.normalize_company(new_company)
@@ -832,9 +1055,9 @@ class DatabaseManager:
                 cursor = conn.cursor()
                 cursor.execute('''
                     UPDATE acts 
-                    SET company = ?, counterparty = ?, period = ?, amount = ?
+                    SET company = ?, counterparty = ?, period = ?, amount = ?, energy_volume = ?
                     WHERE company = ? AND counterparty = ? AND period = ? AND amount = ?
-                ''', (new_company, new_counterparty, new_period, new_amount,
+                ''', (new_company, new_counterparty, new_period, new_amount, energy_volume,
                      old_company, old_counterparty, old_period, old_amount))
                 updated_count = cursor.rowcount
                 logger.info(f"Updated {updated_count} act(s)")
@@ -905,25 +1128,31 @@ class DatabaseManager:
     
     def clear_database(self) -> None:
         """
-        Clear all data from both acts and payments databases.
-        
+        Clear all data from acts, act adjustments, and payments databases.
+
         Warning: This operation cannot be undone!
-        
+
         Raises:
             DatabaseError: If database operation fails
         """
         logger.warning("Clearing all database data")
-        
+
         with self._get_acts_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('DELETE FROM acts')
             acts_deleted = cursor.rowcount
             logger.info(f"Deleted {acts_deleted} acts")
-        
+
+        with self._get_adjustments_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM act_adjustments')
+            adjustments_deleted = cursor.rowcount
+            logger.info(f"Deleted {adjustments_deleted} act adjustments")
+
         with self._get_payments_connection() as conn:
             cursor = conn.cursor()
             cursor.execute('DELETE FROM payments')
             payments_deleted = cursor.rowcount
             logger.info(f"Deleted {payments_deleted} payments")
-        
+
         logger.info("Database cleared successfully")

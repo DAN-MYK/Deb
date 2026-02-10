@@ -1039,6 +1039,14 @@ class DataProcessor:
             import os
             abs_pdf_path = os.path.abspath(file_path)
             
+            # Calculate price_without_vat if we have both cost and volume
+            price_without_vat = None
+            if act_data.get('cost_without_vat') and act_data.get('energy_volume'):
+                try:
+                    price_without_vat = act_data['cost_without_vat'] / act_data['energy_volume']
+                except ZeroDivisionError:
+                    pass
+
             db_manager.save_act(
                 company=executor,
                 counterparty=customer,
@@ -1046,6 +1054,7 @@ class DataProcessor:
                 amount=act_data['amount'],
                 energy_volume=act_data.get('energy_volume'),
                 cost_without_vat=act_data.get('cost_without_vat'),
+                price_without_vat=price_without_vat,
                 pdf_path=abs_pdf_path
             )
             

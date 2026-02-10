@@ -67,7 +67,7 @@ class ActForm:
 
         self.act_window = ctk.CTkToplevel(root)
         self.act_window.title("📄 Додати акт")
-        self.act_window.geometry("650x650")
+        self.act_window.geometry("650x700")
         
         # Центруємо вікно
         self.act_window.transient(root)
@@ -188,64 +188,135 @@ PDF файл має містити:
     def create_manual_tab(self) -> None:
         """Створює вміст вкладки Вручну"""
         tab_manual = self.tabview.tab("Вручну")
-        
+
+        # Scrollable frame для більшої кількості полів
+        scrollable_frame = ctk.CTkScrollableFrame(tab_manual, width=500, height=450)
+        scrollable_frame.pack(pady=10, padx=10, fill="both", expand=True)
+
         # Компанія
         ctk.CTkLabel(
-            tab_manual, 
-            text="Компанія (Организация):", 
+            scrollable_frame,
+            text="Компанія (Организация):",
             font=ctk.CTkFont(size=13)
         ).pack(pady=(10, 3), anchor="w", padx=20)
-        self.company_entry = ctk.CTkEntry(tab_manual, width=400, height=35)
+        self.company_entry = ctk.CTkEntry(scrollable_frame, width=400, height=35)
         self.company_entry.pack(pady=3, padx=20, fill="x")
 
         # Контрагент
         ctk.CTkLabel(
-            tab_manual, 
-            text="Контрагент:", 
+            scrollable_frame,
+            text="Контрагент:",
             font=ctk.CTkFont(size=13)
         ).pack(pady=(8, 3), anchor="w", padx=20)
-        self.counterparty_entry = ctk.CTkEntry(tab_manual, width=400, height=35)
+        self.counterparty_entry = ctk.CTkEntry(scrollable_frame, width=400, height=35)
         self.counterparty_entry.pack(pady=3, padx=20, fill="x")
 
         # Період
         ctk.CTkLabel(
-            tab_manual, 
-            text="Період (наприклад, 11.2019):", 
+            scrollable_frame,
+            text="Період (наприклад, 11.2019):",
             font=ctk.CTkFont(size=13)
         ).pack(pady=(8, 3), anchor="w", padx=20)
         self.period_entry = ctk.CTkEntry(
-            tab_manual, 
-            width=400, 
-            height=35, 
+            scrollable_frame,
+            width=400,
+            height=35,
             placeholder_text="11.2019"
         )
         self.period_entry.pack(pady=3, padx=20, fill="x")
 
-        # Сума
+        # Кількість (кВт/год)
         ctk.CTkLabel(
-            tab_manual, 
-            text="Сумма з ПДВ (наприклад, 1000,50):", 
+            scrollable_frame,
+            text="Кількість (кВт/год):",
+            font=ctk.CTkFont(size=13)
+        ).pack(pady=(8, 3), anchor="w", padx=20)
+        self.energy_volume_entry = ctk.CTkEntry(
+            scrollable_frame,
+            width=400,
+            height=35,
+            placeholder_text="1500,00"
+        )
+        self.energy_volume_entry.pack(pady=3, padx=20, fill="x")
+        # Bind для автообчислення ціни
+        self.energy_volume_entry.bind('<KeyRelease>', self._calculate_price)
+
+        # Фрейм для фінансової інформації
+        finance_frame = ctk.CTkFrame(scrollable_frame, fg_color=("gray92", "gray18"))
+        finance_frame.pack(pady=10, padx=20, fill="x")
+
+        finance_label = ctk.CTkLabel(
+            finance_frame,
+            text="💰 Фінансова інформація",
+            font=ctk.CTkFont(size=13, weight="bold")
+        )
+        finance_label.pack(pady=(10, 5))
+
+        # Сума з ПДВ
+        ctk.CTkLabel(
+            finance_frame,
+            text="Сума з ПДВ:",
             font=ctk.CTkFont(size=13)
         ).pack(pady=(8, 3), anchor="w", padx=20)
         self.amount_entry = ctk.CTkEntry(
-            tab_manual, 
-            width=400, 
-            height=35, 
-            placeholder_text="1000,50"
+            finance_frame,
+            width=400,
+            height=35,
+            placeholder_text="1200,00"
         )
         self.amount_entry.pack(pady=3, padx=20, fill="x")
-        
+        # Bind для автообчислення суми без ПДВ
+        self.amount_entry.bind('<KeyRelease>', self._calculate_cost_without_vat)
+
+        # Сума без ПДВ
+        ctk.CTkLabel(
+            finance_frame,
+            text="Сума без ПДВ (автообчислення: ÷ 1.2):",
+            font=ctk.CTkFont(size=13)
+        ).pack(pady=(8, 3), anchor="w", padx=20)
+        self.cost_without_vat_entry = ctk.CTkEntry(
+            finance_frame,
+            width=400,
+            height=35,
+            placeholder_text="1000,00"
+        )
+        self.cost_without_vat_entry.pack(pady=3, padx=20, fill="x")
+        # Bind для автообчислення ціни
+        self.cost_without_vat_entry.bind('<KeyRelease>', self._calculate_price)
+
+        # Ціна без ПДВ
+        ctk.CTkLabel(
+            finance_frame,
+            text="Ціна без ПДВ за одиницю (автообчислення):",
+            font=ctk.CTkFont(size=13)
+        ).pack(pady=(8, 3), anchor="w", padx=20)
+        self.price_without_vat_entry = ctk.CTkEntry(
+            finance_frame,
+            width=400,
+            height=35,
+            placeholder_text="0,67"
+        )
+        self.price_without_vat_entry.pack(pady=(3, 10), padx=20, fill="x")
+
+        # Підказка про автообчислення
+        ctk.CTkLabel(
+            scrollable_frame,
+            text="ℹ️ Поля автоматично обчислюються, але можна редагувати",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        ).pack(pady=(10, 5))
+
         # Підказка про хоткей
         ctk.CTkLabel(
-            tab_manual,
+            scrollable_frame,
             text="⌨️ Ctrl+Enter для швидкого збереження",
             font=ctk.CTkFont(size=11),
             text_color="gray"
-        ).pack(pady=(15, 5))
-        
+        ).pack(pady=5)
+
         # Кнопка збереження
         ctk.CTkButton(
-            tab_manual,
+            scrollable_frame,
             text="💾 Зберегти",
             command=self.save_act,
             width=250,
@@ -254,6 +325,36 @@ PDF файл має містити:
             fg_color="#2ecc71",
             hover_color="#27ae60"
         ).pack(pady=(5, 20))
+
+    def _calculate_cost_without_vat(self, event: Any = None) -> None:
+        """Автообчислення суми без ПДВ зі суми з ПДВ (÷ 1.2)"""
+        try:
+            amount_str = self.amount_entry.get().strip().replace(',', '.')
+            if amount_str:
+                amount = float(amount_str)
+                cost_without_vat = amount / 1.2
+                self.cost_without_vat_entry.delete(0, 'end')
+                self.cost_without_vat_entry.insert(0, f"{cost_without_vat:.2f}")
+                # Також обчислити ціну
+                self._calculate_price()
+        except (ValueError, ZeroDivisionError):
+            pass
+
+    def _calculate_price(self, event: Any = None) -> None:
+        """Автообчислення ціни без ПДВ (сума без ПДВ / кількість)"""
+        try:
+            cost_str = self.cost_without_vat_entry.get().strip().replace(',', '.')
+            volume_str = self.energy_volume_entry.get().strip().replace(',', '.')
+
+            if cost_str and volume_str:
+                cost = float(cost_str)
+                volume = float(volume_str)
+                if volume > 0:
+                    price = cost / volume
+                    self.price_without_vat_entry.delete(0, 'end')
+                    self.price_without_vat_entry.insert(0, f"{price:.4f}")
+        except (ValueError, ZeroDivisionError):
+            pass
 
     def load_file_1c(self) -> None:
         """Завантаження файлу з 1С або PDF"""
@@ -480,14 +581,25 @@ PDF файл має містити:
             company = self.company_entry.get().strip()
             counterparty = self.counterparty_entry.get().strip()
             period = self.period_entry.get().strip()
+            energy_volume_str = self.energy_volume_entry.get().strip().replace(',', '.')
             amount_str = self.amount_entry.get().strip().replace(',', '.')
-            
-            if not company or not counterparty or not period or not amount_str:
-                raise ValueError("Усі поля мають бути заповнені!")
-            
-            amount = float(amount_str)
+            cost_without_vat_str = self.cost_without_vat_entry.get().strip().replace(',', '.')
+            price_without_vat_str = self.price_without_vat_entry.get().strip().replace(',', '.')
 
-            self.db_manager.save_act(company, counterparty, period, amount)
+            if not company or not counterparty or not period or not amount_str:
+                raise ValueError("Компанія, контрагент, період та сума з ПДВ обов'язкові!")
+
+            amount = float(amount_str)
+            energy_volume = float(energy_volume_str) if energy_volume_str else None
+            cost_without_vat = float(cost_without_vat_str) if cost_without_vat_str else None
+            price_without_vat = float(price_without_vat_str) if price_without_vat_str else None
+
+            self.db_manager.save_act(
+                company, counterparty, period, amount,
+                energy_volume=energy_volume,
+                cost_without_vat=cost_without_vat,
+                price_without_vat=price_without_vat,
+            )
             messagebox.showinfo("Успіх", "Акт успішно збережено!")
             self.update_callback()
             self.act_window.destroy()
